@@ -1,291 +1,283 @@
 package org.firstinspires.ftc.teamcode.Teleop;
 
-import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
-import com.qualcomm.robotcore.hardware.*;
+import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
+
+import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.DcMotorSimple;
+import com.qualcomm.robotcore.hardware.Servo;
+import com.qualcomm.robotcore.hardware.Gamepad;
+import com.qualcomm.robotcore.hardware.NormalizedColorSensor;
+import com.qualcomm.robotcore.hardware.NormalizedRGBA;
+
 import android.graphics.Color;
 
-/*
- * =========================================================
- *  DEFENCE TELEOP — COMPETITION GRADE
- * =========================================================
- *  - Stable spindex
- *  - Deterministic shooting
- *  - Clean state machines
- *  - No encoder fighting
- * =========================================================
- */
-
-@TeleOp(name = "Drive", group = "Linear OpMode")
+@TeleOp(name = "Defence_TeleOp_STICKY_ALL", group = "Linear OpMode")
 public class Drive extends LinearOpMode {
 
-    /* =====================================================
-     * HARDWARE
-     * ===================================================== */
+    // ================= HARDWARE =================
     DcMotor FL, FR, BL, BR;
     DcMotor Shooter, Intake, Spindex;
     Servo Transfer;
     NormalizedColorSensor colorSensor;
 
-    /* =====================================================
-     * CONSTANTS
-     * ===================================================== */
+    StickyGamepad sg1;
 
-    // ---------- DRIVE ----------
-    static final double DRIVE_DEADBAND = 0.05;
-
-    // ---------- SPINDEX ----------
-    static final int[] INDEX_POS = {0, 475, 950};
-    static final int[] SHOOT_POS = {1198, 1653, 2140};
+    // ================= SPINDEX SLOTS =================
+    // 0–2 = indexing, 3–5 = shooting
+    static final int[] SPINDEX_SLOTS = {
+            0,      // slot 0 (empty)
+            475,    // slot 1
+            950,    // slot 2
+            1198,   // slot 3 (shoot 1)
+            1653,   // slot 4 (shoot 2)
+            2140    // slot 5 (shoot 3)
+    };
 
     static final double SPINDEX_POWER = 0.85;
     static final int SPINDEX_TOLERANCE = 8;
 
-    static final long SPINDEX_STALL_TIMEOUT = 700; // ms
+    int spindexSlot = 0;
 
-    // ---------- SERVO ----------
+    // ================= SERVO =================
     static final double TRANSFER_IN = 0.0;
     static final double TRANSFER_OUT = 0.5;
-    static final long SERVO_PULSE_TIME = 350;
+    static final long SERVO_TIME = 350;
 
-    // ---------- SHOOTER ----------
-    static final double SHOOTER_POWER = 1.0;
+    // ================= SHOOTING =================
     static final long SHOOTER_SPINUP_TIME = 600;
     static final int MAX_SHOTS = 3;
 
-    /* =====================================================
-     * STATE
-     * ===================================================== */
+    int shotsFired = 0;
+    long stateTime = 0;
 
     enum ShootState {
         IDLE,
         SPINUP,
-        MOVE_RING,
-        FIRE_OUT,
-        FIRE_IN,
-        NEXT,
-        COMPLETE
+        MOVE_TO_SHOT,
+        SERVO_OUT,
+        SERVO_IN,
+        NEXT_SHOT,
+        DONE
     }
 
     ShootState shootState = ShootState.IDLE;
 
-    int shotIndex = 0;
-    long stateTimer = 0;
-    long spindexMoveStart = 0;
-    boolean shooterPrev = false;
+    // ================= INTAKE =================
+    boolean intakeEnabled = false;
 
-    /* =====================================================
-     * INIT
-     * ===================================================== */
     @Override
     public void runOpMode() {
 
-        // ---------- MAP ----------
+        // ===== MAP HARDWARE =====
         FL = hardwareMap.get(DcMotor.class, "CH_motor2");
         FR = hardwareMap.get(DcMotor.class, "EH_motor1");
         BL = hardwareMap.get(DcMotor.class, "CH_motor1");
         BR = hardwareMap.get(DcMotor.class, "EH_motor3");
 
         Shooter = hardwareMap.get(DcMotor.class, "CH_motor0");
-        Intake  = hardwareMap.get(DcMotor.class, "EH_motor2");
+        Intake = hardwareMap.get(DcMotor.class, "EH_motor2");
         Spindex = hardwareMap.get(DcMotor.class, "EH_motor0");
 
         Transfer = hardwareMap.get(Servo.class, "EH_servo0");
         colorSensor = hardwareMap.get(NormalizedColorSensor.class, "Colorsensor");
 
-        // ---------- CONFIG ----------
+        sg1 = new StickyGamepad(gamepad1);
+
         BL.setDirection(DcMotor.Direction.REVERSE);
         Intake.setDirection(DcMotorSimple.Direction.REVERSE);
 
-        for (DcMotor m : new DcMotor[]{FL, FR, BL, BR, Spindex}) {
-            m.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
-        }
-
+        Spindex.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         Spindex.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
         Spindex.setMode(DcMotor.RunMode.RUN_TO_POSITION);
-        Spindex.setTargetPosition(0);
-        Spindex.setPower(0);
 
         Transfer.setPosition(TRANSFER_IN);
-        colorSensor.setGain(3);
 
         waitForStart();
 
         float[] hsv = new float[3];
 
-        /* =====================================================
-         * LOOP
-         * ===================================================== */
         while (opModeIsActive()) {
 
-            driveControl();
-            intakeControl(hsv);
-            shooterControl();
+            sg1.update();
 
-            telemetry();
+            // ================= DRIVE (ANALOG) =================
+            double y = -sg1.ly();
+            double x = sg1.lx();
+            double r = sg1.rx();
+
+            FL.setPower(y + x + r);
+            FR.setPower(y - x - r);
+            BL.setPower(y - x + r);
+            BR.setPower(y + x - r);
+
+            // ================= INTAKE TOGGLE =================
+            if (sg1.rightTrigger()) {
+                intakeEnabled = !intakeEnabled;
+            }
+            Intake.setPower(intakeEnabled ? 0.75 : 0);
+
+            // ================= COLOR SENSOR =================
+            NormalizedRGBA c = colorSensor.getNormalizedColors();
+            Color.RGBToHSV(
+                    (int)(c.red * 255),
+                    (int)(c.green * 255),
+                    (int)(c.blue * 255),
+                    hsv
+            );
+
+            boolean validRing =
+                    ((hsv[0] > 130 && hsv[0] < 170 && hsv[1] > 0.5) ||
+                            (hsv[0] > 200 && hsv[0] < 260 && hsv[1] > 0.4));
+
+            // ================= INDEXING (NO SKIP) =================
+            if (intakeEnabled && validRing && shootState == ShootState.IDLE) {
+                if (spindexSlot < 2) {
+                    moveToSlot(spindexSlot + 1);
+                }
+            }
+
+            // ================= SHOOT START =================
+            if (sg1.leftTrigger() && shootState == ShootState.IDLE) {
+                shotsFired = 0;
+                stateTime = now();
+                shootState = ShootState.SPINUP;
+            }
+
+            // ================= CANCEL SHOOT =================
+            if (sg1.x()) {
+                resetAfterShooting();
+            }
+
+            // ================= SHOOT FSM =================
+            switch (shootState) {
+
+                case SPINUP:
+                    Shooter.setPower(1.0);
+                    if (elapsed(SHOOTER_SPINUP_TIME)) {
+                        moveToSlot(3);
+                        shootState = ShootState.MOVE_TO_SHOT;
+                    }
+                    break;
+
+                case MOVE_TO_SHOT:
+                    if (atTarget()) {
+                        Transfer.setPosition(TRANSFER_OUT);
+                        stateTime = now();
+                        shootState = ShootState.SERVO_OUT;
+                    }
+                    break;
+
+                case SERVO_OUT:
+                    if (elapsed(SERVO_TIME)) {
+                        Transfer.setPosition(TRANSFER_IN);
+                        stateTime = now();
+                        shootState = ShootState.SERVO_IN;
+                    }
+                    break;
+
+                case SERVO_IN:
+                    if (elapsed(SERVO_TIME)) {
+                        shotsFired++;
+                        shootState = ShootState.NEXT_SHOT;
+                    }
+                    break;
+
+                case NEXT_SHOT:
+                    if (shotsFired < MAX_SHOTS) {
+                        moveToSlot(3 + shotsFired);
+                        shootState = ShootState.MOVE_TO_SHOT;
+                    } else {
+                        shootState = ShootState.DONE;
+                    }
+                    break;
+
+                case DONE:
+                    resetAfterShooting();
+                    break;
+
+                case IDLE:
+                default:
+                    Shooter.setPower(0);
+                    holdSpindex();
+                    break;
+            }
+
+            telemetry.addData("Slot", spindexSlot);
+            telemetry.addData("Shots", shotsFired);
+            telemetry.addData("ShootState", shootState);
+            telemetry.update();
         }
     }
 
-    /* =====================================================
-     * DRIVE
-     * ===================================================== */
-    void driveControl() {
-        double y = -deadband(gamepad1.left_stick_y);
-        double x =  deadband(gamepad1.left_stick_x);
-        double r =  deadband(gamepad1.right_stick_x);
+    // ================= SPINDEX HELPERS =================
 
-        double fl = y + x + r;
-        double fr = y - x - r;
-        double bl = y - x + r;
-        double br = y + x - r;
-
-        double max = Math.max(1.0,
-                Math.max(Math.abs(fl),
-                        Math.max(Math.abs(fr),
-                                Math.max(Math.abs(bl), Math.abs(br)))));
-
-        FL.setPower(fl / max);
-        FR.setPower(fr / max);
-        BL.setPower(bl / max);
-        BR.setPower(br / max);
-    }
-
-    double deadband(double v) {
-        return Math.abs(v) < DRIVE_DEADBAND ? 0 : v;
-    }
-
-    /* =====================================================
-     * INTAKE + AUTO INDEX
-     * ===================================================== */
-    void intakeControl(float[] hsv) {
-        boolean intakeOn = gamepad1.right_trigger > 0.1;
-        Intake.setPower(intakeOn ? 0.75 : 0);
-
-        NormalizedRGBA c = colorSensor.getNormalizedColors();
-        Color.RGBToHSV(
-                (int)(c.red * 255),
-                (int)(c.green * 255),
-                (int)(c.blue * 255),
-                hsv
-        );
-
-        boolean validRing =
-                ((hsv[0] > 130 && hsv[0] < 170 && hsv[1] > 0.5) ||
-                        (hsv[0] > 200 && hsv[0] < 260 && hsv[1] > 0.4));
-
-        if (intakeOn && validRing && shootState == ShootState.IDLE) {
-            advanceIndex();
-        }
-    }
-
-    void advanceIndex() {
-        int currentTarget = Spindex.getTargetPosition();
-        if (currentTarget == INDEX_POS[0]) moveSpindex(INDEX_POS[1]);
-        else if (currentTarget == INDEX_POS[1]) moveSpindex(INDEX_POS[2]);
-    }
-
-    /* =====================================================
-     * SHOOTER FSM
-     * ===================================================== */
-    void shooterControl() {
-        boolean shooterOn = gamepad1.left_trigger > 0.1;
-        Shooter.setPower(shooterOn ? SHOOTER_POWER : 0);
-
-        if (shooterOn && !shooterPrev && shootState == ShootState.IDLE) {
-            shotIndex = 0;
-            stateTimer = now();
-            shootState = ShootState.SPINUP;
-        }
-        shooterPrev = shooterOn;
-
-        switch (shootState) {
-
-            case SPINUP:
-                if (elapsed(SHOOTER_SPINUP_TIME)) {
-                    moveSpindex(SHOOT_POS[0]);
-                    shootState = ShootState.MOVE_RING;
-                }
-                break;
-
-            case MOVE_RING:
-                if (spindexAtTarget()) {
-                    Transfer.setPosition(TRANSFER_OUT);
-                    stateTimer = now();
-                    shootState = ShootState.FIRE_OUT;
-                } else if (stalled()) {
-                    moveSpindex(Spindex.getTargetPosition());
-                }
-                break;
-
-            case FIRE_OUT:
-                if (elapsed(SERVO_PULSE_TIME)) {
-                    Transfer.setPosition(TRANSFER_IN);
-                    stateTimer = now();
-                    shootState = ShootState.FIRE_IN;
-                }
-                break;
-
-            case FIRE_IN:
-                if (elapsed(SERVO_PULSE_TIME)) {
-                    shootState = ShootState.NEXT;
-                }
-                break;
-
-            case NEXT:
-                shotIndex++;
-                if (shotIndex < MAX_SHOTS) {
-                    moveSpindex(SHOOT_POS[shotIndex]);
-                    shootState = ShootState.MOVE_RING;
-                } else {
-                    shootState = ShootState.COMPLETE;
-                }
-                break;
-
-            case COMPLETE:
-                shootState = ShootState.IDLE;
-                break;
-
-            case IDLE:
-            default:
-                break;
-        }
-    }
-
-    /* =====================================================
-     * SPINDEX CORE
-     * ===================================================== */
-    void moveSpindex(int target) {
-        Spindex.setTargetPosition(target);
+    void moveToSlot(int slot) {
+        spindexSlot = slot;
+        Spindex.setTargetPosition(SPINDEX_SLOTS[slot]);
         Spindex.setPower(SPINDEX_POWER);
-        spindexMoveStart = now();
     }
 
-    boolean spindexAtTarget() {
+    void holdSpindex() {
+        Spindex.setTargetPosition(SPINDEX_SLOTS[spindexSlot]);
+        Spindex.setPower(0.1);
+    }
+
+    boolean atTarget() {
         return Math.abs(
                 Spindex.getCurrentPosition() - Spindex.getTargetPosition()
         ) <= SPINDEX_TOLERANCE;
     }
 
-    boolean stalled() {
-        return now() - spindexMoveStart > SPINDEX_STALL_TIMEOUT;
+    void resetAfterShooting() {
+        shotsFired = 0;
+        shootState = ShootState.IDLE;
+        moveToSlot(1);
     }
 
-    /* =====================================================
-     * TIME + TELEMETRY
-     * ===================================================== */
     long now() {
         return System.currentTimeMillis();
     }
 
     boolean elapsed(long ms) {
-        return now() - stateTimer >= ms;
+        return now() - stateTime >= ms;
     }
 
-    void telemetry() {
-        telemetry.addData("Shoot State", shootState);
-        telemetry.addData("Spindex Pos", Spindex.getCurrentPosition());
-        telemetry.addData("Spindex Target", Spindex.getTargetPosition());
-        telemetry.addData("Shot Index", shotIndex);
-        telemetry.update();
+    // ================= STICKY GAMEPAD =================
+    class StickyGamepad {
+
+        private final Gamepad cur;
+        private final Gamepad prev = new Gamepad();
+        static final double TRIGGER_THRESHOLD = 0.15;
+
+        StickyGamepad(Gamepad gamepad) {
+            cur = gamepad;
+        }
+
+        void update() {
+            prev.copy(cur);
+        }
+
+        boolean a() { return cur.a && !prev.a; }
+        boolean b() { return cur.b && !prev.b; }
+        boolean x() { return cur.x && !prev.x; }
+        boolean y() { return cur.y && !prev.y; }
+
+        boolean lb() { return cur.left_bumper && !prev.left_bumper; }
+        boolean rb() { return cur.right_bumper && !prev.right_bumper; }
+
+        boolean leftTrigger() {
+            return cur.left_trigger > TRIGGER_THRESHOLD &&
+                    prev.left_trigger <= TRIGGER_THRESHOLD;
+        }
+
+        boolean rightTrigger() {
+            return cur.right_trigger > TRIGGER_THRESHOLD &&
+                    prev.right_trigger <= TRIGGER_THRESHOLD;
+        }
+
+        double lx() { return cur.left_stick_x; }
+        double ly() { return cur.left_stick_y; }
+        double rx() { return cur.right_stick_x; }
     }
 }
